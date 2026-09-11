@@ -7,7 +7,7 @@ import logging
 import os
 from dataclasses import dataclass
 from enum import Enum
-from typing import TypeAlias
+from typing import Dict, List, Optional, Union
 
 from kafka import KafkaConsumer
 from kafka.errors import KafkaError
@@ -18,10 +18,16 @@ DEFAULT_TOPIC = "uwb"
 DEFAULT_GROUP = "uwb-python-client"
 DEFAULT_TIMEOUT_MS = 10_000
 
-JsonValue: TypeAlias = (
-    None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
-)
-Payload: TypeAlias = JsonValue | bytes
+JsonValue = Union[
+    None,
+    bool,
+    int,
+    float,
+    str,
+    List["JsonValue"],
+    Dict[str, "JsonValue"],
+]
+Payload = Union[JsonValue, bytes]
 
 LOGGER = logging.getLogger(__name__)
 
@@ -33,7 +39,7 @@ class OffsetMode(str, Enum):
     EARLIEST = "earliest"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ConsumerConfig:
     """Kafka consumer connection settings."""
 
@@ -63,7 +69,7 @@ def loadConfig() -> ConsumerConfig:
     )
 
 
-def decodeText(raw_value: bytes | None) -> str | None:
+def decodeText(raw_value: Optional[bytes]) -> Optional[str]:
     """Decode an optional Kafka key without losing invalid byte sequences."""
     if raw_value is None:
         return None
@@ -71,7 +77,7 @@ def decodeText(raw_value: bytes | None) -> str | None:
     return raw_value.decode("utf-8", errors="replace")
 
 
-def decodePayload(raw_value: bytes | None) -> Payload:
+def decodePayload(raw_value: Optional[bytes]) -> Payload:
     """Decode UTF-8 JSON when possible and preserve other payloads safely."""
     if raw_value is None:
         return None
@@ -88,16 +94,36 @@ def decodePayload(raw_value: bytes | None) -> Payload:
 
 
 def createConsumer(config: ConsumerConfig) -> KafkaConsumer:
-    """Create a configured Kafka consumer."""
+    """Create a Kafka consumer without subscribing to a topic."""
     return KafkaConsumer(
-        config.topic,
         bootstrap_servers=[config.server],
         group_id=config.group,
         auto_offset_reset=config.offset.value,
         enable_auto_commit=True,
-        bootstrap_timeout_ms=DEFAULT_TIMEOUT_MS,
         request_timeout_ms=DEFAULT_TIMEOUT_MS,
     )
+
+
+def subscribeTopic(consumer: KafkaConsumer, topic: str) -> None:
+    """Verify that a topic exists before subscribing to it."""
+    available_topics = consumer.topics()
+    if topic not in available_topics:
+        raise ValueError(f"Kafka topic does not exist: {topic!r}")
+
+    consumer.subscribe([topic])
+
+
+def startConsumer(config: ConsumerConfig) -> KafkaConsumer:
+    """Create a consumer and establish its topic subscription."""
+    consumer = createConsumer(config)
+
+    try:
+        subscribeTopic(consumer, config.topic)
+    except (KafkaError, ValueError):
+        consumer.close()
+        raise
+
+    return consumer
 
 
 def consumeMessages(consumer: KafkaConsumer) -> None:
@@ -125,7 +151,7 @@ def main() -> int:
 
     try:
         config = loadConfig()
-        consumer = createConsumer(config)
+        consumer = startConsumer(config)
     except (KafkaError, ValueError) as error:
         LOGGER.error("consumer startup failed | error=%s", error)
         return 1
